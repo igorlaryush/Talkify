@@ -1,0 +1,14 @@
+# venv
+venv/
+
+# ngrok
+ngrok.exe
+
+# data folder
+data/
+
+# .env file
+.env
+
+# __pycache__ folder
+__pycache__/

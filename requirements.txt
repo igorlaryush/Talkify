@@ -1,0 +1,7 @@
+python-telegram-bot
+fastapi
+uvicorn
+pyngrok
+python-dotenv
+openai
+motor
