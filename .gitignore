@@ -1,6 +1,9 @@
 # venv
 venv/
 
+# ssh
+.vscode/
+
 # ngrok
 ngrok.exe
 
