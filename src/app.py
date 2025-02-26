@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pathlib import Path
 import tempfile
-from texts import CHATGPT_PROMPT_TEMPLATE
+from texts.prompt_tamplates import CHATGPT_PROMPT_TEMPLATE
 from database import MongoDB
 from datetime import datetime, timezone
 from telebot.handler_backends import State, StatesGroup
@@ -34,6 +34,7 @@ AVAILABLE_LANGUAGES = {
     "German": "🇩🇪 German",
     "Italian": "🇮🇹 Italian",
     "Portuguese": "🇵🇹 Portuguese",
+    "Russian": "🇷🇺 Russian",
 }
 
 # Create state storage
@@ -48,7 +49,17 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb://admin:admin@localhost:27017/")
 db = MongoDB(MONGO_URL)
 
 # Add constants for time limits
-FREE_TIER_DAILY_LIMIT = 10  # 60 seconds per day
+FREE_TIER_DAILY_LIMIT = int(os.environ.get("FREE_TIER_DAILY_LIMIT", 10))  # 60 seconds per day
+
+# Set up bot commands for menu
+async def setup_bot_commands():
+    """Set up bot commands that will be shown in the menu"""
+    commands = [
+        telebot.types.BotCommand("start", "Start the bot"),
+        telebot.types.BotCommand("help", "Show help information"),
+        telebot.types.BotCommand("premium", "Learn about premium features")
+    ]
+    await bot.set_my_commands(commands)
 
 def start_ngrok(port: int):
     "Function to start ngrok and get the public URL"
@@ -105,17 +116,58 @@ async def generate_voice(text: str) -> str:
         return tmp_file.name
 
 
-@bot.message_handler(commands=['start', 'help'])
-async def send_welcome(message: telebot.types.Message):
-    """Function to send the welcome message"""
+# Функция для создания кнопок на языке пользователя
+def create_user_interface_buttons(user_language="English"):
+    """Create buttons in the user's language"""
+    # Словарь с текстами кнопок на разных языках
+    button_texts = {
+        "English": {
+            "text_in_english": "🇬🇧 Text the same in English",
+            "hints": "🆘 I'm stuck! Hints, please",
+            "finish": "🏁 Finish & get feedback",
+            "word_count": "🔤 How many words did I say?"
+        },
+        "Russian": {
+            "text_in_english": "🇬🇧 Написать то же самое на Английском",
+            "hints": "🆘 Я застрял! Подсказки, пожалуйста",
+            "finish": "🏁 Закончить и получить обратную связь",
+            "word_count": "🔤 Сколько я наговорил?"
+        },
+        # Добавьте другие языки по мере необходимости
+    }
+    
+    # Используем английский по умолчанию, если язык пользователя не поддерживается
+    texts = button_texts.get(user_language, button_texts["English"])
+    
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    
+    # Создаем кнопки
+    btn_english = telebot.types.KeyboardButton(texts["text_in_english"])
+    btn_hints = telebot.types.KeyboardButton(texts["hints"])
+    btn_finish = telebot.types.KeyboardButton(texts["finish"])
+    btn_word_count = telebot.types.KeyboardButton(texts["word_count"])
+    
+    # Добавляем кнопки в разметку
+    markup.add(btn_english)
+    markup.row(btn_hints, btn_finish)
+    markup.add(btn_word_count)
+    
+    return markup
+
+
+@bot.message_handler(commands=['start'])
+async def handle_start(message: telebot.types.Message):
+    """Handler for the /start command"""
     user = await db.get_or_create_user(message.from_user.id, message.from_user.username)
     
     welcome_text = """
-Hello! I'm a bot that can respond to your text and voice messages with AI-generated voice responses.
+👋 Welcome to Talkify!
+
+I'm a bot that can respond to your text and voice messages with AI-generated voice responses.
 You can use me to practice your language skills with AI-generated voice responses.
 
 Available commands:
-• /help - Show this help message
+• /help - Show help information
 • /premium - Learn about premium features
 """
 
@@ -124,7 +176,42 @@ Available commands:
     else:
         welcome_text += "\n🔒 Upgrade to premium to unlock language selection and more features!"
 
-    await bot.reply_to(message, welcome_text)
+    # Получаем язык пользователя
+    user_language = user.get("language", "English")
+    # Создаем клавиатуру на языке пользователя
+    markup = create_user_interface_buttons(user_language)
+    
+    await bot.reply_to(message, welcome_text, reply_markup=markup)
+
+
+@bot.message_handler(commands=['help'])
+async def handle_help(message: telebot.types.Message):
+    """Handler for the /help command"""
+    user = await db.get_or_create_user(message.from_user.id, message.from_user.username)
+    
+    help_text = """
+ℹ️ Help Information:
+
+You can send me text or voice messages, and I'll respond with AI-generated voice.
+This is perfect for practicing your language skills!
+
+Available commands:
+• /start - Start the bot
+• /help - Show this help message
+• /premium - Learn about premium features
+"""
+
+    if user.get("is_premium"):
+        help_text += "• /language - Change your preferred language 🌐"
+    else:
+        help_text += "\n🔒 Upgrade to premium to unlock language selection and more features!"
+
+    # Получаем язык пользователя
+    user_language = user.get("language", "English")
+    # Создаем клавиатуру на языке пользователя
+    markup = create_user_interface_buttons(user_language)
+    
+    await bot.reply_to(message, help_text, reply_markup=markup)
 
 
 @bot.message_handler(commands=['premium'])
@@ -213,6 +300,14 @@ async def callback_language(call: telebot.types.CallbackQuery):
         call.message.chat.id,
         call.message.message_id
     )
+    
+    # Обновляем клавиатуру с кнопками на новом языке
+    markup = create_user_interface_buttons(selected_language)
+    await bot.send_message(
+        call.message.chat.id,
+        "Interface updated to your selected language.",
+        reply_markup=markup
+    )
 
 
 async def check_usage_limits(user_id: int) -> tuple[bool, float]:
@@ -229,9 +324,45 @@ async def check_usage_limits(user_id: int) -> tuple[bool, float]:
     return remaining_seconds > 0, remaining_seconds
 
 
+# Обработчики для кнопок интерфейса
+@bot.message_handler(func=lambda message: message.text and "Text the same in English" in message.text or "Написать то же самое на Английском" in message.text)
+async def handle_text_in_english(message: telebot.types.Message):
+    """Handler for 'Text the same in English' button"""
+    # Заглушка для будущей реализации
+    await bot.reply_to(message, "This feature will be implemented soon!")
+
+
+@bot.message_handler(func=lambda message: message.text and ("I'm stuck! Hints" in message.text or "Я застрял! Подсказки" in message.text))
+async def handle_hints(message: telebot.types.Message):
+    """Handler for 'I'm stuck! Hints, please' button"""
+    # Заглушка для будущей реализации
+    await bot.reply_to(message, "Hints feature will be implemented soon!")
+
+
+@bot.message_handler(func=lambda message: message.text and ("Finish & get feedback" in message.text or "Закончить и получить обратную связь" in message.text))
+async def handle_finish(message: telebot.types.Message):
+    """Handler for 'Finish & get feedback' button"""
+    # Заглушка для будущей реализации
+    await bot.reply_to(message, "Feedback feature will be implemented soon!")
+
+
+@bot.message_handler(func=lambda message: message.text and ("How many words did I say" in message.text or "Сколько я наговорил" in message.text))
+async def handle_word_count(message: telebot.types.Message):
+    """Handler for 'How many words did I say?' button"""
+    # Заглушка для будущей реализации
+    await bot.reply_to(message, "Word count feature will be implemented soon!")
+
+
 @bot.message_handler(content_types=['voice', 'text'])
 async def handle_message(message: telebot.types.Message):
     """Handle both voice and text messages"""
+    # Проверяем, не является ли сообщение командой кнопки
+    if message.text and any(keyword in message.text for keyword in [
+        "Text the same in English", "I'm stuck! Hints", "Finish & get feedback", "How many words did I say",
+        "Написать то же самое на Английском", "Я застрял! Подсказки", "Закончить и получить обратную связь", "Сколько я наговорил"
+    ]):
+        return  # Пропускаем обработку, так как это команда кнопки
+        
     try:
         # Store or get user
         user = await db.get_or_create_user(
@@ -342,6 +473,10 @@ if __name__ == "__main__":
     # Check if we're running in production (on Google Cloud)
     is_production = os.getenv("ENVIRONMENT") == "production"
     
+    # Set up bot commands for the menu
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(setup_bot_commands())
+    
     if is_production:
         # In production, use the server's domain or IP
         webhook_base_url = os.getenv("WEBHOOK_URL")
@@ -349,7 +484,6 @@ if __name__ == "__main__":
             raise ValueError("WEBHOOK_URL environment variable must be set in production")
         
         # Set the webhook using the production URL
-        loop = asyncio.get_event_loop()
         loop.run_until_complete(set_webhook(webhook_base_url + "/webhook"))
         
         # Run FastAPI app on port 8080 (standard port for Google Cloud)
@@ -360,7 +494,6 @@ if __name__ == "__main__":
         public_url = start_ngrok(8000)
         
         # Set the webhook using the ngrok URL
-        loop = asyncio.get_event_loop()
         loop.run_until_complete(set_webhook(public_url + "/webhook"))
         
         # Run FastAPI app on port 8000 for local development

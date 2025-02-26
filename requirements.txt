@@ -5,3 +5,5 @@ pyngrok
 python-dotenv
 openai
 motor
+pyTelegramBotAPI
+aiohttp

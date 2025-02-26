@@ -65,3 +65,20 @@ class MongoDB:
             {"user_id": user_id},
             {"$set": {"language": language}}
         )
+
+    async def add_conversation(self, user_id: int, topic: str, messages: list, feedback: str):
+        """Store a completed conversation with feedback"""
+        conversation = {
+            "user_id": user_id,
+            "topic": topic,
+            "messages": messages,
+            "feedback": feedback,
+            "created_at": datetime.now(timezone.utc)
+        }
+        await self.db.conversations.insert_one(conversation)
+        return conversation
+
+    async def get_user_conversations(self, user_id: int, limit: int = 5) -> List[Dict]:
+        """Get user's recent conversations"""
+        cursor = self.db.conversations.find({"user_id": user_id}).sort("created_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
