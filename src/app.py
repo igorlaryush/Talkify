@@ -339,13 +339,30 @@ async def set_webhook(webhook_url: str):
 
 # Main entry point
 if __name__ == "__main__":
-    # Start ngrok and get the public URL
-    public_url = start_ngrok(8000)
-
-    # Set the webhook using the ngrok URL
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(set_webhook(public_url + "/webhook"))
-
-    # Run FastAPI app on port 8000 (or any port of your choice)
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Check if we're running in production (on Google Cloud)
+    is_production = os.getenv("ENVIRONMENT") == "production"
+    
+    if is_production:
+        # In production, use the server's domain or IP
+        webhook_base_url = os.getenv("WEBHOOK_URL")
+        if not webhook_base_url:
+            raise ValueError("WEBHOOK_URL environment variable must be set in production")
+        
+        # Set the webhook using the production URL
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(set_webhook(webhook_base_url + "/webhook"))
+        
+        # Run FastAPI app on port 8080 (standard port for Google Cloud)
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=8080)
+    else:
+        # In development, use ngrok as before
+        public_url = start_ngrok(8000)
+        
+        # Set the webhook using the ngrok URL
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(set_webhook(public_url + "/webhook"))
+        
+        # Run FastAPI app on port 8000 for local development
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=8000)
