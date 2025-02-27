@@ -15,6 +15,7 @@ from database import MongoDB
 from datetime import datetime, timezone
 from telebot.handler_backends import State, StatesGroup
 from telebot.storage import StateMemoryStorage
+import base64
 
 # read .env file
 load_dotenv()
@@ -57,7 +58,8 @@ async def setup_bot_commands():
     commands = [
         telebot.types.BotCommand("start", "Start the bot"),
         telebot.types.BotCommand("help", "Show help information"),
-        telebot.types.BotCommand("premium", "Learn about premium features")
+        telebot.types.BotCommand("premium", "Learn about premium features"),
+        telebot.types.BotCommand("premium_audio", "Toggle Premium Audio mode (Premium only)")
     ]
     await bot.set_my_commands(commands)
 
@@ -93,7 +95,7 @@ async def transcribe_voice(file_path: str) -> str:
 async def generate_response(message: str, CHATGPT_PROMPT: str) -> str:
     """Generate response using ChatGPT"""
     response = await client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": CHATGPT_PROMPT},
             {"role": "user", "content": message}
@@ -202,7 +204,8 @@ Available commands:
 """
 
     if user.get("is_premium"):
-        help_text += "• /language - Change your preferred language 🌐"
+        help_text += """• /language - Change your preferred language 🌐
+• /premium_audio - Toggle Premium Audio mode for direct voice-to-voice AI conversations"""
     else:
         help_text += "\n🔒 Upgrade to premium to unlock language selection and more features!"
 
@@ -210,6 +213,10 @@ Available commands:
     user_language = user.get("language", "English")
     # Создаем клавиатуру на языке пользователя
     markup = create_user_interface_buttons(user_language)
+    
+    # Добавляем информацию о текущем режиме Premium Audio
+    if user.get("is_premium") and user.get("premium_audio_mode", False):
+        help_text += "\n\n🎙️ Premium Audio Mode is currently ACTIVE. Send voice messages for direct AI processing."
     
     await bot.reply_to(message, help_text, reply_markup=markup)
 
@@ -353,6 +360,87 @@ async def handle_word_count(message: telebot.types.Message):
     await bot.reply_to(message, "Word count feature will be implemented soon!")
 
 
+@bot.message_handler(commands=['premium_audio'])
+async def premium_audio_command(message: telebot.types.Message):
+    """Handler for premium audio mode toggle"""
+    user = await db.get_or_create_user(message.from_user.id, message.from_user.username)
+    
+    if not user.get("is_premium"):
+        await bot.reply_to(
+            message,
+            "🔒 Premium Audio mode is a premium feature!\n\n"
+            "Use /premium to upgrade and unlock:\n"
+            "• Direct voice-to-voice AI conversations\n"
+            "• Advanced audio processing with GPT-4o\n"
+            "• No transcription needed - pure audio experience"
+        )
+        return
+    
+    # Переключаем режим Premium Audio
+    current_mode = user.get("premium_audio_mode", False)
+    new_mode = not current_mode
+    
+    # Обновляем настройки пользователя
+    await db.users.update_one(
+        {"user_id": message.from_user.id},
+        {"$set": {"premium_audio_mode": new_mode}}
+    )
+    
+    if new_mode:
+        response_text = "✅ Premium Audio mode is now ON!\n\nSend voice messages directly to the AI without transcription. The AI will respond with voice using advanced GPT-4o audio processing."
+    else:
+        response_text = "❌ Premium Audio mode is now OFF.\n\nReturning to standard mode with transcription."
+    
+    await bot.reply_to(message, response_text)
+
+
+# Обновляем функцию для обработки аудио с помощью GPT-4o
+async def process_audio_with_gpt4o(audio_file_path: str, user_language: str) -> tuple:
+    """Process audio directly with GPT-4o audio model and get voice response"""
+    try:
+        with open(audio_file_path, 'rb') as audio_file:
+            # Кодируем аудио в base64
+            audio_bytes = audio_file.read()
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            
+            # Определяем формат файла
+            file_format = os.path.splitext(audio_file_path)[1][1:]  # Получаем расширение без точки
+            
+            # Создаем промпт для аудио модели на языке пользователя
+            system_prompt = f"You are a helpful language practice assistant. Respond in {user_language}. Keep responses concise and helpful for language learning."
+            
+            # Отправляем запрос в модель
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini-audio-preview",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": file_format}}
+                        ]
+                    }
+                ],
+                modalities=["text", "audio"],
+                audio={"voice": "alloy", "format": "mp3"}
+            )
+            
+            # Извлекаем текст и аудио из ответа
+            response_text = response.choices[0].message.audio.transcript
+            audio_data = base64.b64decode(response.choices[0].message.audio.data)
+            print(response_text, audio_data)
+
+            # Сохраняем аудио во временный файл
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
+                tmp_file.write(audio_data)
+                voice_file_path = tmp_file.name
+            
+            return response_text, voice_file_path
+    except Exception as e:
+        print(f"Error processing audio with GPT-4o: {str(e)}")
+        return f"Sorry, there was an error processing your audio: {str(e)}", None
+
+
 @bot.message_handler(content_types=['voice', 'text'])
 async def handle_message(message: telebot.types.Message):
     """Handle both voice and text messages"""
@@ -372,6 +460,18 @@ async def handle_message(message: telebot.types.Message):
 
         # Get user's language
         user_language = user.get("language", "English")
+
+        # Проверяем, включен ли режим Premium Audio
+        premium_audio_mode = user.get("premium_audio_mode", False)
+        
+        # Если включен режим Premium Audio, но сообщение не голосовое
+        if premium_audio_mode and message.content_type != 'voice':
+            await bot.reply_to(
+                message,
+                "⚠️ Premium Audio mode is active! Please send a voice message for direct voice-to-voice AI conversation.\n\n"
+                "To disable Premium Audio mode, use /premium_audio command."
+            )
+            return
 
         # Update CHATGPT_PROMPT with user's language
         CHATGPT_PROMPT = CHATGPT_PROMPT_TEMPLATE.substitute(
@@ -397,9 +497,13 @@ async def handle_message(message: telebot.types.Message):
 
         # Уведомление о записи голоса
         await bot.send_chat_action(message.chat.id, 'record_voice')
+        
+        voice_file_path = None  # Initialize variable for cleanup
 
-        # Get input text either from voice or text message
-        if message.content_type == 'voice':
+        # Обработка в зависимости от режима
+        if premium_audio_mode and message.content_type == 'voice':
+            # Premium Audio Mode - прямая обработка аудио без транскрибации
+            
             # Download voice message
             file_info = await bot.get_file(message.voice.file_id)
             downloaded_file = await bot.download_file(file_info.file_path)
@@ -407,22 +511,45 @@ async def handle_message(message: telebot.types.Message):
             # Save to temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix='.ogg') as tmp_file:
                 tmp_file.write(downloaded_file)
-                voice_file_path = tmp_file.name
-
-            # Transcribe voice to text
-            input_text = await transcribe_voice(voice_file_path)
-            os.unlink(voice_file_path)  # Clean up temp file
+                voice_input_path = tmp_file.name
+            
+            # Обработка аудио напрямую с GPT-4o - получаем и текст, и аудио ответ
+            response_text, voice_file_path = await process_audio_with_gpt4o(voice_input_path, user_language)
+            
+            # Очистка временного входного файла
+            os.unlink(voice_input_path)
+            
+            # Приблизительная длительность ответа
+            response_duration = len(response_text.split()) / 3  # rough estimate: 3 words per second
+            
         else:
-            input_text = message.text
+            # Стандартный режим с транскрибацией
+            # Get input text either from voice or text message
+            if message.content_type == 'voice':
+                # Download voice message
+                file_info = await bot.get_file(message.voice.file_id)
+                downloaded_file = await bot.download_file(file_info.file_path)
 
-        # Generate ChatGPT response
-        response_text = await generate_response(input_text, CHATGPT_PROMPT)
+                # Save to temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.ogg') as tmp_file:
+                    tmp_file.write(downloaded_file)
+                    voice_file_path = tmp_file.name
 
-        # Generate voice response
-        voice_file_path = await generate_voice(response_text)
+                # Transcribe voice to text
+                input_text = await transcribe_voice(voice_file_path)
+                os.unlink(voice_file_path)  # Clean up temp file
+                voice_file_path = None  # Reset variable after cleanup
+            else:
+                input_text = message.text
 
-        # Calculate response duration (approximate)
-        response_duration = len(response_text.split()) / 3  # rough estimate: 3 words per second
+            # Generate ChatGPT response
+            response_text = await generate_response(input_text, CHATGPT_PROMPT)
+            
+            # Приблизительная длительность ответа
+            response_duration = len(response_text.split()) / 3  # rough estimate: 3 words per second
+
+            # Generate voice response
+            voice_file_path = await generate_voice(response_text)
 
         # Check if this response would exceed the limit
         if not user.get("is_premium") and remaining_seconds < response_duration:
@@ -436,28 +563,33 @@ async def handle_message(message: telebot.types.Message):
                 🌟 Upgrade to Premium for unlimited access!
                 Use /premium to learn more."""
             )
-            os.unlink(voice_file_path)
+            if voice_file_path and os.path.exists(voice_file_path):
+                os.unlink(voice_file_path)  # Clean up temp file if we abort
             return
 
         # Store message in database with duration
         await db.add_message(
             message.from_user.id,
-            input_text,
+            input_text if 'input_text' in locals() else "[Premium Audio Mode - Direct Voice Processing]",
             response_text,
             response_duration
         )
 
         # Send voice message with hidden text response
         with open(voice_file_path, 'rb') as voice:
+            # Добавляем индикатор режима Premium Audio
+            mode_indicator = "🎙️ [Premium Audio] " if premium_audio_mode else ""
+            
             await bot.send_voice(
                 message.chat.id,
                 voice,
-                caption=f"💭 <tg-spoiler>{response_text}</tg-spoiler>",
+                caption=f"{mode_indicator}💭 <tg-spoiler>{response_text}</tg-spoiler>",
                 parse_mode='HTML',
             )
 
         # Clean up temporary voice file
-        os.unlink(voice_file_path)
+        if voice_file_path and os.path.exists(voice_file_path):
+            os.unlink(voice_file_path)
 
     except Exception as e:
         await bot.reply_to(message, f"Sorry, an error occurred: {str(e)}")

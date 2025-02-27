@@ -20,6 +20,7 @@ class MongoDB:
                 "username": username,
                 "is_premium": False,
                 "language": "English",  # Default language
+                "premium_audio_mode": False,  # Default Premium Audio mode setting
                 "created_at": datetime.now(timezone.utc)
             }
             await self.users.insert_one(user)
@@ -64,6 +65,13 @@ class MongoDB:
         await self.users.update_one(
             {"user_id": user_id},
             {"$set": {"language": language}}
+        )
+        
+    async def set_premium_audio_mode(self, user_id: int, enabled: bool):
+        """Update user's Premium Audio mode setting"""
+        await self.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"premium_audio_mode": enabled}}
         )
 
     async def add_conversation(self, user_id: int, topic: str, messages: list, feedback: str):
